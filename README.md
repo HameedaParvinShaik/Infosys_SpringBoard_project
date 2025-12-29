@@ -1,3 +1,19 @@
+# Initialising Backend
+once after installing the zip file of the project, in VS Code, open terminal and change the file directory to backend folder:
+
+`cd backend`
+
+after visiting backend folder, run the following commands:
+
+`npm install`
+`npm run dev`
+
+If the backend is successfully initialised, you will get a log like:
+<img width="1277" height="314" alt="image" src="https://github.com/user-attachments/assets/c2c59686-8582-4697-a4a1-47d5af0e4e89" />
+
+
+
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
