@@ -1,24 +1,62 @@
 const path = require('path');
 const fs = require('fs').promises;
-const { PythonShell } = require('python-shell'); // Add this import
+const { PythonShell } = require('python-shell');
 const { logger } = require('../utils/logger');
 const emailService = require('../services/email.service');
 const config = require('../config/config');
 const ProcessingJob = require('../models/ProcessingJob');
 
+// ========== DEBUG: ADD THESE LINES AT THE TOP ==========
+console.log("🔍 DEBUG: Testing Python availability...");
+const { execSync } = require('child_process');
+
+// Try different Python paths
+const possiblePaths = ['python', 'python3', '/usr/bin/python3', '/usr/local/bin/python3'];
+
+let workingPythonPath = null;
+for (const pythonPath of possiblePaths) {
+  try {
+    const version = execSync(`${pythonPath} --version`).toString().trim();
+    console.log(`✅ Found Python at: ${pythonPath} (${version})`);
+    workingPythonPath = pythonPath;
+    break;
+  } catch (error) {
+    console.log(`❌ Python not found at: ${pythonPath}`);
+  }
+}
+
+if (!workingPythonPath) {
+  console.log("⚠️ WARNING: No Python found! ML processing will fail.");
+} else {
+  console.log(`🎯 Using Python at: ${workingPythonPath}`);
+}
+// ========== END DEBUG ==========
+
 // Add Python ML configuration
 const ML_CONFIG = {
-  pythonPath: process.env.PYTHON_PATH || 'python3',
+  pythonPath: workingPythonPath || 'python3', // Use the detected Python path
   modelPath: path.join(__dirname, '../ml/sentiment_model.pkl'),
   vectorizerPath: path.join(__dirname, '../ml/tfidf_vectorizer.pkl'),
   scriptPath: path.join(__dirname, '../ml/sentiment_integration.py'),
   tempDir: path.join(__dirname, '../temp')
 };
 
+// ========== ADD MORE DEBUG ==========
+console.log("\n🔍 DEBUG: Checking ML files...");
+console.log("1. Model path:", ML_CONFIG.modelPath);
+console.log("   Exists:", fs.existsSync(ML_CONFIG.modelPath));
+console.log("2. Vectorizer path:", ML_CONFIG.vectorizerPath);
+console.log("   Exists:", fs.existsSync(ML_CONFIG.vectorizerPath));
+console.log("3. Script path:", ML_CONFIG.scriptPath);
+console.log("   Exists:", fs.existsSync(ML_CONFIG.scriptPath));
+console.log("4. Temp dir:", ML_CONFIG.tempDir);
+// ========== END DEBUG ==========
+
 // Ensure temp directory exists
 const ensureTempDir = async () => {
   try {
     await fs.mkdir(ML_CONFIG.tempDir, { recursive: true });
+    console.log("✅ Temp directory ready:", ML_CONFIG.tempDir);
   } catch (error) {
     logger.warn('Temp directory creation warning:', error);
   }
@@ -113,6 +151,10 @@ const transformMLResults = (mlResults, jobId) => {
  */
 const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
   try {
+    console.log(`\n🚀 STARTING ML PROCESSING for job ${jobId}`);
+    console.log(`   File: ${filePath}`);
+    console.log(`   User: ${userId}`);
+    
     // Ensure temp directory exists
     await ensureTempDir();
     
@@ -127,6 +169,7 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
     
     // Prepare output file path
     const outputPath = path.join(ML_CONFIG.tempDir, `results_${jobId}.json`);
+    console.log(`   Output path: ${outputPath}`);
     
     // Prepare Python script options
     const options = {
@@ -139,12 +182,22 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
         filePath,
         outputPath
       ],
-      pythonOptions: ['-u'] // Unbuffered output
+      pythonOptions: ['-u'], // Unbuffered output
+      stdio: 'pipe' // Capture all output
     };
+    
+    console.log(`   Python command: ${ML_CONFIG.pythonPath}`);
+    console.log(`   Script: sentiment_integration.py`);
+    console.log(`   Args: ${options.args.join(' ')}`);
     
     // Run Python ML analysis
     PythonShell.run('sentiment_integration.py', options, async (err, pythonOutput) => {
+      console.log("\n📊 PYTHON SHELL COMPLETED");
+      console.log("   Error:", err ? err.message : "None");
+      console.log("   Output length:", pythonOutput ? pythonOutput.length : 0);
+      
       if (err) {
+        console.log("❌ PYTHON ERROR DETAILS:", err);
         logger.error('Python ML processing error:', err);
         
         await ProcessingJob.findByIdAndUpdate(jobId, {
@@ -168,22 +221,36 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
         // Read results from output file
         let resultData;
         try {
-          const resultContent = await fs.readFile(outputPath, 'utf8');
-          resultData = JSON.parse(resultContent);
-        } catch (readError) {
-          // Try to get results from python output
-          if (pythonOutput && pythonOutput.length > 0) {
-            try {
-              resultData = JSON.parse(pythonOutput.join(''));
-            } catch (parseError) {
-              throw new Error(`Failed to parse results: ${readError.message}`);
-            }
+          console.log("   Looking for output file:", outputPath);
+          if (fs.existsSync(outputPath)) {
+            const resultContent = await fs.readFile(outputPath, 'utf8');
+            console.log("   Found output file, parsing...");
+            resultData = JSON.parse(resultContent);
           } else {
-            throw new Error(`No results file or output: ${readError.message}`);
+            console.log("   Output file not found, checking python output...");
+            // Try to get results from python output
+            if (pythonOutput && pythonOutput.length > 0) {
+              console.log("   Python output available, parsing...");
+              try {
+                resultData = JSON.parse(pythonOutput.join(''));
+              } catch (parseError) {
+                console.log("   Failed to parse python output:", parseError.message);
+                throw new Error(`Failed to parse results: ${parseError.message}`);
+              }
+            } else {
+              console.log("   No python output either");
+              throw new Error(`No results file or output`);
+            }
           }
+        } catch (readError) {
+          console.log("   Read error:", readError.message);
+          throw readError;
         }
         
+        console.log("   Result success:", resultData.success);
+        
         if (!resultData.success) {
+          console.log("   ML processing failed:", resultData.error);
           throw new Error(resultData.error || 'ML processing failed');
         }
         
@@ -197,6 +264,11 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
         } = transformMLResults(resultData.results || [], jobId);
         
         const processingTimeMs = Date.now() - (await ProcessingJob.findById(jobId)).startedAt;
+        
+        console.log(`   Processed ${totalProcessed} records`);
+        console.log(`   Positive: ${sentimentDistribution.positive}`);
+        console.log(`   Negative: ${sentimentDistribution.negative}`);
+        console.log(`   Average confidence: ${averageConfidence}`);
         
         // Update job with ML results
         await ProcessingJob.findByIdAndUpdate(jobId, {
@@ -214,16 +286,22 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
             average_confidence: averageConfidence,
             model_used: 'sentiment_model.pkl',
             vectorizer_used: 'tfidf_vectorizer.pkl'
-          }
+          },
+          mlEnabled: true
         });
         
+        console.log(`✅ JOB ${jobId} COMPLETED with ML analysis`);
         logger.info(`Job ${jobId} completed with ML analysis. Processed ${totalProcessed} records.`);
         
         // Clean up files
         try {
           await fs.unlink(filePath);
-          await fs.unlink(outputPath);
+          if (fs.existsSync(outputPath)) {
+            await fs.unlink(outputPath);
+          }
+          console.log("   Cleaned up temporary files");
         } catch (cleanupError) {
+          console.log("   Cleanup warning:", cleanupError.message);
           logger.warn('Cleanup error:', cleanupError);
         }
         
@@ -247,6 +325,7 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
         }
         
       } catch (parseError) {
+        console.log("❌ RESULTS PARSING ERROR:", parseError);
         logger.error('Results parsing/processing error:', parseError);
         
         await ProcessingJob.findByIdAndUpdate(jobId, {
@@ -269,6 +348,7 @@ const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
     });
     
   } catch (error) {
+    console.log("❌ BACKGROUND PROCESSING SETUP ERROR:", error);
     logger.error('Background processing setup error:', error);
     
     try {
@@ -321,7 +401,8 @@ const processText = async (req, res) => {
       filePath: tempFilePath,
       fileType: '.txt',
       status: 'pending',
-      parallelWorkers: options?.parallelWorkers || 1
+      parallelWorkers: options?.parallelWorkers || 1,
+      mlEnabled: true
     });
     
     await job.save();
@@ -337,7 +418,8 @@ const processText = async (req, res) => {
       data: { 
         jobId: job._id,
         filename: 'direct_text_input.txt',
-        estimatedTime: 'Processing with ML model...'
+        estimatedTime: 'Processing with ML model...',
+        mlProcessing: true
       }
     });
   } catch (error) {
@@ -395,6 +477,12 @@ const uploadFile = async (req, res) => {
     });
     
     await job.save();
+    
+    console.log(`\n📁 FILE UPLOADED for ML processing:`);
+    console.log(`   User: ${userId}`);
+    console.log(`   File: ${file.originalname}`);
+    console.log(`   Job ID: ${job._id}`);
+    console.log(`   Path: ${file.path}`);
     
     logger.info(`File uploaded for ML processing: ${file.originalname} by user ${userId}, Job ID: ${job._id}`);
 
