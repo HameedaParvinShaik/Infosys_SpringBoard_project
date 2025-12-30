@@ -1,19 +1,20 @@
 const path = require('path');
-const fs = require('fs').promises;
+const fs = require('fs');            // For synchronous methods like existsSync
+const fsp = require('fs').promises;  // For async methods like readFile, writeFile, mkdir
 const { PythonShell } = require('python-shell');
 const { logger } = require('../utils/logger');
 const emailService = require('../services/email.service');
 const config = require('../config/config');
 const ProcessingJob = require('../models/ProcessingJob');
-
-// ========== DEBUG: ADD THESE LINES AT THE TOP ==========
-console.log("🔍 DEBUG: Testing Python availability...");
 const { execSync } = require('child_process');
+
+// ========== DEBUG: Test Python availability ==========
+console.log("🔍 DEBUG: Testing Python availability...");
 
 // Try different Python paths
 const possiblePaths = ['python', 'python3', '/usr/bin/python3', '/usr/local/bin/python3'];
-
 let workingPythonPath = null;
+
 for (const pythonPath of possiblePaths) {
   try {
     const version = execSync(`${pythonPath} --version`).toString().trim();
@@ -30,18 +31,17 @@ if (!workingPythonPath) {
 } else {
   console.log(`🎯 Using Python at: ${workingPythonPath}`);
 }
-// ========== END DEBUG ==========
 
-// Add Python ML configuration
+// ========== ML CONFIGURATION ==========
 const ML_CONFIG = {
-  pythonPath: workingPythonPath || 'python3', // Use the detected Python path
+  pythonPath: workingPythonPath || 'python3', // Use detected Python
   modelPath: path.join(__dirname, '../ml/sentiment_model.pkl'),
   vectorizerPath: path.join(__dirname, '../ml/tfidf_vectorizer.pkl'),
   scriptPath: path.join(__dirname, '../ml/sentiment_integration.py'),
   tempDir: path.join(__dirname, '../temp')
 };
 
-// ========== ADD MORE DEBUG ==========
+// ========== DEBUG: Check ML files ==========
 console.log("\n🔍 DEBUG: Checking ML files...");
 console.log("1. Model path:", ML_CONFIG.modelPath);
 console.log("   Exists:", fs.existsSync(ML_CONFIG.modelPath));
@@ -50,12 +50,11 @@ console.log("   Exists:", fs.existsSync(ML_CONFIG.vectorizerPath));
 console.log("3. Script path:", ML_CONFIG.scriptPath);
 console.log("   Exists:", fs.existsSync(ML_CONFIG.scriptPath));
 console.log("4. Temp dir:", ML_CONFIG.tempDir);
-// ========== END DEBUG ==========
 
-// Ensure temp directory exists
+// ========== Ensure temp directory exists ==========
 const ensureTempDir = async () => {
   try {
-    await fs.mkdir(ML_CONFIG.tempDir, { recursive: true });
+    await fsp.mkdir(ML_CONFIG.tempDir, { recursive: true });
     console.log("✅ Temp directory ready:", ML_CONFIG.tempDir);
   } catch (error) {
     logger.warn('Temp directory creation warning:', error);
