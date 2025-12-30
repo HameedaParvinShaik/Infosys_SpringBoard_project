@@ -1,247 +1,348 @@
+// controllers/text.controller.js
+const pythonService = require('../services/pythonService');
 const path = require('path');
-const fs = require('fs');
-const fsp = require('fs').promises;
-const { PythonShell } = require('python-shell');
-const { execSync } = require('child_process');
-const { logger } = require('../utils/logger');
-const emailService = require('../services/email.service');
-const config = require('../config/config');
-const ProcessingJob = require('../models/ProcessingJob');
+const fs = require('fs-extra');
+const { v4: uuidv4 } = require('uuid');
 
-// ===== DEBUG PYTHON =====
-console.log("🔍 DEBUG: Testing Python availability...");
-const possiblePaths = ['python', 'python3', '/usr/bin/python3', '/usr/local/bin/python3'];
-let workingPythonPath = null;
-for (const pythonPath of possiblePaths) {
-  try {
-    const version = execSync(`${pythonPath} --version`).toString().trim();
-    console.log(`✅ Found Python at: ${pythonPath} (${version})`);
-    workingPythonPath = pythonPath;
-    break;
-  } catch { console.log(`❌ Python not found at: ${pythonPath}`); }
-}
-if (!workingPythonPath) console.log("⚠️ WARNING: No Python found! ML processing will fail.");
-else console.log(`🎯 Using Python at: ${workingPythonPath}`);
+// Store processing jobs (in production, use Redis or database)
+const processingJobs = new Map();
 
-// ===== ML CONFIG =====
-const ML_CONFIG = {
-  pythonPath: workingPythonPath || 'python3',
-  modelPath: path.join(__dirname, '../ml/sentiment_model.pkl'),
-  vectorizerPath: path.join(__dirname, '../ml/tfidf_vectorizer.pkl'),
-  scriptPath: path.join(__dirname, '../ml/sentiment_integration.py'),
-  tempDir: path.join(__dirname, '../temp')
-};
-
-// ===== Async file check =====
-const fileExists = async (filePath) => {
-  try { await fsp.access(filePath); return true; }
-  catch { return false; }
-};
-
-// Check ML files
-(async () => {
-  console.log("\n🔍 DEBUG: Checking ML files...");
-  console.log("1. Model path:", ML_CONFIG.modelPath, "Exists:", await fileExists(ML_CONFIG.modelPath));
-  console.log("2. Vectorizer path:", ML_CONFIG.vectorizerPath, "Exists:", await fileExists(ML_CONFIG.vectorizerPath));
-  console.log("3. Script path:", ML_CONFIG.scriptPath, "Exists:", await fileExists(ML_CONFIG.scriptPath));
-  console.log("4. Temp dir:", ML_CONFIG.tempDir);
-})();
-
-// Ensure temp dir exists
-const ensureTempDir = async () => {
-  try { await fsp.mkdir(ML_CONFIG.tempDir, { recursive: true }); }
-  catch (err) { logger.warn('Temp dir creation warning:', err); }
-};
-
-// ===== Keyword extraction =====
-const extractKeywords = (text) => {
-  if (!text || typeof text !== 'string') return [];
-  const stopWords = new Set(['the','and','a','an','in','on','at','to','for','of','with','by','is','are','was','were','be','been','being','have','has','had','do','does','did','will','would','should','could','can','may','might','must','this','that','these','those','i','you','he','she','it','we','they','me','him','her','us','them']);
-  const words = text.toLowerCase().replace(/[^\w\s]/g,' ').split(/\s+/).filter(w => w.length>3 && !stopWords.has(w) && !/\d/.test(w));
-  const wordCount = {};
-  words.forEach(w => wordCount[w] = (wordCount[w]||0)+1);
-  return Object.entries(wordCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([word])=>word);
-};
-
-// ===== Transform ML results =====
-const transformMLResults = (mlResults) => {
-  const transformedResults = mlResults.map((item, idx)=>({
-    lineNumber: idx+1,
-    originalText: item.text || item.originalText || '',
-    sentimentScore: (item.confidence||0)*100,
-    sentimentLabel: item.sentiment||'neutral',
-    confidence: item.confidence||0,
-    probabilities: item.probabilities||{ positive:0, negative:0 },
-    keywords: extractKeywords(item.text||''),
-    patternsFound: item.patternsFound||[],
-    metadata: { length:(item.text||'').length, wordCount:(item.text||'').split(/\s+/).filter(w=>w.length>0).length, processedAt: new Date().toISOString() }
-  }));
-  const sentimentDistribution = {
-    positive: mlResults.filter(r=>r.sentiment==='positive').length,
-    neutral: mlResults.filter(r=>!r.sentiment || r.sentiment==='neutral').length,
-    negative: mlResults.filter(r=>r.sentiment==='negative').length
-  };
-  const confidenceScores = mlResults.filter(r=>r.confidence).map(r=>r.confidence);
-  const averageConfidence = confidenceScores.length>0 ? confidenceScores.reduce((a,b)=>a+b,0)/confidenceScores.length : 0;
-  const averageSentiment = transformedResults.length>0 ? transformedResults.reduce((sum,i)=>sum+i.sentimentScore,0)/transformedResults.length : 0;
-  return { transformedResults, sentimentDistribution, averageConfidence, averageSentiment, totalProcessed: transformedResults.length };
-};
-
-// ===== Background ML job =====
-const processJobInBackground = async (jobId, filePath, userId, userEmail) => {
-  try {
-    await ensureTempDir();
-    await ProcessingJob.findByIdAndUpdate(jobId, { status:'processing', startedAt:new Date(), progress:20 });
-
-    const outputPath = path.join(ML_CONFIG.tempDir, `results_${jobId}.json`);
-    const options = {
-      mode:'text',
-      pythonPath:ML_CONFIG.pythonPath,
-      scriptPath:path.dirname(ML_CONFIG.scriptPath),
-      args:[ML_CONFIG.modelPath, ML_CONFIG.vectorizerPath, filePath, outputPath],
-      pythonOptions:['-u'],
-      stdio:'pipe'
-    };
-
-    PythonShell.run('sentiment_integration.py', options, async (err, pythonOutput)=>{
-      if(err){
-        await ProcessingJob.findByIdAndUpdate(jobId, { status:'failed', errorMessage: err.message, failedAt:new Date(), progress:0 });
-        try{ await fsp.unlink(filePath); } catch{}; 
-        return;
+class TextController {
+  // Upload and process file
+  async uploadFile(req, res) {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'No file uploaded'
+        });
       }
 
-      try{
-        let resultData;
-        if(await fileExists(outputPath)) resultData = JSON.parse(await fsp.readFile(outputPath,'utf8'));
-        else resultData = JSON.parse(pythonOutput.join(''));
+      const jobId = uuidv4();
+      
+      // Start processing in background
+      processingJobs.set(jobId, {
+        status: 'processing',
+        filename: req.file.filename,
+        startedAt: new Date()
+      });
 
-        const { transformedResults, sentimentDistribution, averageConfidence, averageSentiment, totalProcessed } = transformMLResults(resultData.results||[]);
+      // Process in background
+      this.processFileAsync(jobId, req.file.path, req.body);
 
-        await ProcessingJob.findByIdAndUpdate(jobId,{
-          status:'completed',
-          progress:100,
-          completedAt:new Date(),
-          totalLines:totalProcessed,
-          workersUsed:1,
-          averageSentiment,
-          sentimentDistribution,
-          results:transformedResults,
-          mlStatistics:{...resultData.statistics, average_confidence:averageConfidence, model_used:'sentiment_model.pkl', vectorizer_used:'tfidf_vectorizer.pkl'},
-          mlEnabled:true
+      return res.json({
+        success: true,
+        jobId: jobId,
+        message: 'File uploaded and processing started',
+        filename: req.file.filename
+      });
+
+    } catch (error) {
+      console.error('Upload error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to upload file'
+      });
+    }
+  }
+
+  // Async file processing
+  async processFileAsync(jobId, filePath, options = {}) {
+    try {
+      const textColumn = options.textColumn || null;
+      const maxTexts = options.maxTexts || 1000;
+
+      // Call Python service
+      const result = await pythonService.analyzeFile(filePath, textColumn, maxTexts);
+
+      // Update job status
+      processingJobs.set(jobId, {
+        ...processingJobs.get(jobId),
+        status: 'completed',
+        completedAt: new Date(),
+        result: result
+      });
+
+      // Clean up file
+      try {
+        await fs.unlink(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to cleanup file:', cleanupError);
+      }
+
+    } catch (error) {
+      console.error('Processing error:', error);
+      
+      processingJobs.set(jobId, {
+        ...processingJobs.get(jobId),
+        status: 'failed',
+        completedAt: new Date(),
+        error: error.message
+      });
+
+      // Clean up file on error
+      try {
+        await fs.unlink(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to cleanup file on error:', cleanupError);
+      }
+    }
+  }
+
+  // Process direct text
+  async processText(req, res) {
+    try {
+      const { text } = req.body;
+
+      if (!text) {
+        return res.status(400).json({
+          success: false,
+          error: 'Text is required'
         });
+      }
 
-        try{ await fsp.unlink(filePath); if(await fileExists(outputPath)) await fsp.unlink(outputPath); } catch{} 
+      const result = await pythonService.analyzeText(text);
 
-        if(config.email?.enabled && emailService?.sendProcessingComplete){
-          try{
-            await emailService.sendProcessingComplete(
-              userEmail,
-              (await ProcessingJob.findById(jobId)).originalFilename,
-              { totalRecords: totalProcessed, positiveCount: sentimentDistribution.positive, negativeCount: sentimentDistribution.negative, averageConfidence, processingTime:`${(Date.now()-(await ProcessingJob.findById(jobId)).startedAt)/1000}s` }
-            );
-          } catch(e){logger.warn('Email fail:', e);}
+      return res.json({
+        success: true,
+        ...result
+      });
+
+    } catch (error) {
+      console.error('Text processing error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process text'
+      });
+    }
+  }
+
+  // Process batch files
+  async processBatch(req, res) {
+    try {
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No files uploaded'
+        });
+      }
+
+      const jobId = uuidv4();
+      const files = req.files;
+
+      processingJobs.set(jobId, {
+        status: 'processing',
+        fileCount: files.length,
+        startedAt: new Date(),
+        files: files.map(f => f.filename)
+      });
+
+      // Process in background
+      this.processBatchAsync(jobId, files, req.body);
+
+      return res.json({
+        success: true,
+        jobId: jobId,
+        message: `Processing ${files.length} files`,
+        fileCount: files.length
+      });
+
+    } catch (error) {
+      console.error('Batch processing error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process batch'
+      });
+    }
+  }
+
+  // Async batch processing
+  async processBatchAsync(jobId, files, options = {}) {
+    try {
+      const results = [];
+      const textColumn = options.textColumn || null;
+      const maxTexts = options.maxTexts || 1000;
+
+      for (const file of files) {
+        try {
+          const result = await pythonService.analyzeFile(file.path, textColumn, maxTexts);
+          results.push({
+            filename: file.filename,
+            success: true,
+            result: result
+          });
+        } catch (fileError) {
+          results.push({
+            filename: file.filename,
+            success: false,
+            error: fileError.message
+          });
         }
 
-      }catch(parseError){
-        await ProcessingJob.findByIdAndUpdate(jobId,{ status:'failed', errorMessage:parseError.message, failedAt:new Date(), progress:50 });
-        try{ await fsp.unlink(filePath); if(await fileExists(outputPath)) await fsp.unlink(outputPath); } catch{}
+        // Clean up file
+        try {
+          await fs.unlink(file.path);
+        } catch (cleanupError) {
+          console.warn(`Failed to cleanup ${file.filename}:`, cleanupError);
+        }
       }
-    });
-  } catch(error){
-    await ProcessingJob.findByIdAndUpdate(jobId,{ status:'failed', errorMessage:error.message, failedAt:new Date(), progress:0 });
-    try{ await fsp.unlink(filePath); } catch{}
-  }
-};
 
-// ===== CONTROLLERS =====
-const processText = async (req,res)=>{
-  try{
-    const { text, options } = req.body;
-    const { userId,email:userEmail } = req.user;
-    if(!text||!text.trim()) return res.status(400).json({ success:false, message:'Text is required' });
+      // Update job status
+      processingJobs.set(jobId, {
+        ...processingJobs.get(jobId),
+        status: 'completed',
+        completedAt: new Date(),
+        results: results
+      });
 
-    await ensureTempDir();
-    const tempFile = path.join(ML_CONFIG.tempDir, `direct_${Date.now()}.txt`);
-    await fsp.writeFile(tempFile,text,'utf8');
-
-    const job = new ProcessingJob({ userId, filename:`direct_${Date.now()}.txt`, originalFilename:'direct_text_input.txt', filePath:tempFile, fileType:'.txt', status:'pending', parallelWorkers:options?.parallelWorkers||1, mlEnabled:true });
-    await job.save();
-    processJobInBackground(job._id,tempFile,userId,userEmail);
-
-    res.json({ success:true, message:'Text processing started', data:{ jobId:job._id, filename:'direct_text_input.txt', mlProcessing:true } });
-  }catch(e){ logger.error(e); res.status(500).json({ success:false, message:'Failed to process text' }); }
-};
-
-const uploadFile = async (req,res)=>{
-  try{
-    if(!req.file) return res.status(400).json({ success:false, message:'No file uploaded' });
-    const { userId,email:userEmail } = req.user;
-    const file = req.file;
-    const ext = path.extname(file.originalname).toLowerCase();
-    if(!['.txt','.csv','.json'].includes(ext)){ try{ await fsp.unlink(file.path); } catch{}; return res.status(400).json({ success:false, message:`File type ${ext} not supported` }); }
-
-    const job = new ProcessingJob({ userId, filename:file.filename, originalFilename:file.originalname, filePath:file.path, fileSize:file.size, fileType:ext, status:'pending', mlEnabled:true });
-    await job.save();
-    processJobInBackground(job._id,file.path,userId,userEmail);
-
-    res.json({ success:true, message:'File uploaded and ML processing started', data:{ jobId:job._id, filename:file.originalname, mlProcessing:true } });
-  }catch(e){ logger.error(e); if(req.file?.path){ try{ await fsp.unlink(req.file.path); } catch{} } res.status(500).json({ success:false, message:'Failed to upload file' }); }
-};
-
-const processBatch = async (req,res)=>{
-  try{
-    const { userId,email:userEmail } = req.user;
-    if(!req.files||!req.files.length) return res.status(400).json({ success:false, message:'No files uploaded' });
-    const batchId=`batch_ml_${Date.now()}_${userId}`;
-    const batchJobs=[];
-    for(const file of req.files){
-      const ext=path.extname(file.originalname).toLowerCase();
-      if(!['.txt','.csv','.json'].includes(ext)) continue;
-      const job=new ProcessingJob({ userId, filename:file.filename, originalFilename:file.originalname, filePath:file.path, fileSize:file.size, fileType:ext, status:'pending', batchId, mlEnabled:true });
-      await job.save();
-      batchJobs.push({ jobId:job._id, filename:file.originalname, status:'pending' });
-      processJobInBackground(job._id,file.path,userId,userEmail);
+    } catch (error) {
+      console.error('Batch async error:', error);
+      
+      processingJobs.set(jobId, {
+        ...processingJobs.get(jobId),
+        status: 'failed',
+        completedAt: new Date(),
+        error: error.message
+      });
     }
-    if(!batchJobs.length) return res.status(400).json({ success:false, message:'No valid files for ML' });
-    res.json({ success:true, message:'Batch ML processing started', data:{ batchId, totalFiles:batchJobs.length, jobs:batchJobs } });
-  }catch(e){ logger.error(e); if(req.files){ for(const f of req.files){ try{ await fsp.unlink(f.path); } catch{} } } res.status(500).json({ success:false, message:'Batch processing failed' }); }
-};
+  }
 
-const getStatus = async (req,res)=>{
-  try{
-    const { jobId }=req.params; const { userId }=req.user;
-    const job=await ProcessingJob.findOne({_id:jobId,userId}).select('_id originalFilename status progress createdAt startedAt completedAt failedAt errorMessage mlEnabled');
-    if(!job) return res.status(404).json({ success:false, message:'Job not found' });
-    const resp={ success:true, data:{ jobId:job._id, filename:job.originalFilename, status:job.status, progress:job.progress||0, mlProcessing:job.mlEnabled||false, createdAt:job.createdAt, startedAt:job.startedAt, ...(job.completedAt&&{completedAt:job.completedAt}), ...(job.failedAt&&{failedAt:job.failedAt, error:job.errorMessage, mlError:job.mlEnabled?'ML failed':null}) } };
-    if(job.status==='processing'&&job.mlEnabled) resp.data.estimatedTime='ML analysis in progress...';
-    res.json(resp);
-  }catch(e){ logger.error(e); res.status(500).json({ success:false, message:'Failed to get job status' }); }
-};
+  // Get job status
+  async getStatus(req, res) {
+    try {
+      const { jobId } = req.params;
+      
+      if (!processingJobs.has(jobId)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Job not found'
+        });
+      }
 
-const getResults = async (req,res)=>{
-  try{
-    const { jobId }=req.params; const { userId }=req.user; const { limit=50,page=1 }=req.query;
-    const job=await ProcessingJob.findOne({_id:jobId,userId}).select('filename originalFilename status results totalLines processingTimeMs averageSentiment sentimentDistribution mlStatistics createdAt completedAt mlEnabled');
-    if(!job) return res.status(404).json({ success:false, message:'Job not found' });
-    if(job.status!=='completed') return res.status(400).json({ success:false, message:'Job not completed', data:{status:job.status} });
-    const skip=(page-1)*limit; const paginated=job.results?job.results.slice(skip,skip+parseInt(limit)):[]; 
-    const resp={ success:true, data:{ jobId:job._id, filename:job.originalFilename, status:job.status, mlProcessed:job.mlEnabled||false, statistics:{ totalLines:job.totalLines, processingTimeMs:job.processingTimeMs, averageSentiment:job.averageSentiment, sentimentDistribution:job.sentimentDistribution, mlStatistics:job.mlStatistics||{} }, results:paginated, pagination:{ page:parseInt(page), limit:parseInt(limit), total:job.results?job.results.length:0, totalPages:job.results?Math.ceil(job.results.length/limit):0 }, createdAt:job.createdAt, completedAt:job.completedAt } };
-    if(job.mlEnabled&&job.mlStatistics) resp.data.mlDetails={ modelUsed:job.mlStatistics.model_used||'sentiment_model.pkl', confidence:job.mlStatistics.average_confidence?Math.round(job.mlStatistics.average_confidence*100)+'%':'N/A', accuracy:job.mlStatistics.accuracy||'N/A' };
-    res.json(resp);
-  }catch(e){ logger.error(e); res.status(500).json({ success:false, message:'Failed to get results' }); }
-};
+      const job = processingJobs.get(jobId);
+      
+      return res.json({
+        success: true,
+        jobId: jobId,
+        status: job.status,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        filename: job.filename,
+        fileCount: job.fileCount
+      });
 
-const cancelJob = async (req,res)=>{
-  try{
-    const { jobId }=req.params; const { userId }=req.user;
-    const job=await ProcessingJob.findOneAndUpdate({_id:jobId,userId,status:{$in:['pending','processing']}},{ status:'cancelled', cancelledAt:new Date(), progress:0, errorMessage:'Cancelled by user' },{ new:true });
-    if(!job) return res.status(404).json({ success:false, message:'Job not found or cannot be cancelled' });
-    if(job.filePath) try{ await fsp.unlink(job.filePath); }catch(e){logger.warn(e);}
-    const resultPath=path.join(ML_CONFIG.tempDir,`results_${jobId}.json`);
-    try{ if(await fileExists(resultPath)) await fsp.unlink(resultPath); }catch(e){logger.warn(e);}
-    res.json({ success:true, message:'Job cancelled', data:{ jobId:job._id, status:'cancelled', mlCancelled:job.mlEnabled||false } });
-  }catch(e){ logger.error(e); res.status(500).json({ success:false, message:'Failed to cancel job' }); }
-};
+    } catch (error) {
+      console.error('Status check error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to check status'
+      });
+    }
+  }
 
-// ===== EXPORT =====
-module.exports = { uploadFile, processText, processBatch, getStatus, getResults, cancelJob, processJobInBackground };
+  // Get results
+  async getResults(req, res) {
+    try {
+      const { jobId } = req.params;
+      
+      if (!processingJobs.has(jobId)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Job not found'
+        });
+      }
+
+      const job = processingJobs.get(jobId);
+      
+      if (job.status === 'processing') {
+        return res.json({
+          success: true,
+          status: 'processing',
+          message: 'Job is still processing'
+        });
+      }
+
+      if (job.status === 'failed') {
+        return res.json({
+          success: false,
+          status: 'failed',
+          error: job.error
+        });
+      }
+
+      return res.json({
+        success: true,
+        status: 'completed',
+        result: job.result,
+        results: job.results,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt
+      });
+
+    } catch (error) {
+      console.error('Results error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to get results'
+      });
+    }
+  }
+
+  // Cancel job
+  async cancelJob(req, res) {
+    try {
+      const { jobId } = req.params;
+      
+      if (!processingJobs.has(jobId)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Job not found'
+        });
+      }
+
+      const job = processingJobs.get(jobId);
+      
+      if (job.status === 'completed' || job.status === 'failed') {
+        return res.json({
+          success: false,
+          error: 'Job already completed'
+        });
+      }
+
+      // Update status
+      processingJobs.set(jobId, {
+        ...job,
+        status: 'cancelled',
+        cancelledAt: new Date()
+      });
+
+      return res.json({
+        success: true,
+        message: 'Job cancelled successfully'
+      });
+
+    } catch (error) {
+      console.error('Cancel error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to cancel job'
+      });
+    }
+  }
+
+  // Get supported formats
+  async getSupportedFormats(req, res) {
+    try {
+      const formats = await pythonService.getSupportedFormats();
+      return res.json(formats);
+    } catch (error) {
+      console.error('Formats error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to get supported formats'
+      });
+    }
+  }
+}
+
+module.exports = new TextController();
