@@ -30,6 +30,12 @@ const ProcessingJobSchema = new mongoose.Schema({
   },
   errorMessage: String,
   
+  // ML Processing Flag - ADD THIS
+  mlEnabled: {
+    type: Boolean,
+    default: false
+  },
+  
   // Processing configuration
   parallelWorkers: {
     type: Number,
@@ -51,6 +57,12 @@ const ProcessingJobSchema = new mongoose.Schema({
     negative: Number
   },
   
+  // ML Statistics - ADD THIS
+  mlStatistics: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  
   // Results (embedded documents for better performance)
   results: [{
     lineNumber: Number,
@@ -60,10 +72,18 @@ const ProcessingJobSchema = new mongoose.Schema({
       type: String,
       enum: ['positive', 'neutral', 'negative']
     },
+    confidence: Number,  // ADD THIS FOR ML CONFIDENCE
+    probabilities: {      // ADD THIS FOR ML PROBABILITIES
+      positive: Number,
+      negative: Number
+    },
     keywords: [String],
     patternsFound: [String],
     metadata: mongoose.Schema.Types.Mixed
   }],
+  
+  // Batch processing (optional)
+  batchId: String,
   
   // Timestamps
   createdAt: {
@@ -81,6 +101,7 @@ const ProcessingJobSchema = new mongoose.Schema({
 // Indexes for faster queries
 ProcessingJobSchema.index({ userId: 1, createdAt: -1 });
 ProcessingJobSchema.index({ status: 1 });
+ProcessingJobSchema.index({ mlEnabled: 1 });  // ADD THIS INDEX
 ProcessingJobSchema.index({ 'createdAt': -1 });
 
 module.exports = mongoose.model('ProcessingJob', ProcessingJobSchema);
