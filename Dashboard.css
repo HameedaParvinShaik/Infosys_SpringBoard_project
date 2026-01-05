@@ -1,0 +1,120 @@
+/* ================= CONTAINER ================= */
+.page-container {
+  min-height: 100vh;
+  padding: 40px 20px;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  color: white;
+}
+
+/* ================= HEADER ================= */
+.page-container h1 {
+  text-align: center;
+  font-size: 2.5rem;
+  margin-bottom: 40px;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+
+/* ================= DASHBOARD GRID ================= */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+
+@media (max-width: 768px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ================= CARD ================= */
+.card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(15px);
+  border-radius: 20px;
+  padding: 30px 25px;
+  box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.15);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 25px 60px rgba(37, 99, 235, 0.6);
+}
+
+/* ================= CARD HEADINGS ================= */
+.card h3 {
+  margin-bottom: 15px;
+  font-size: 1.5rem;
+  color: #60a5fa;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+/* ================= PARAGRAPHS ================= */
+.card p {
+  color: #cbd5f5;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* ================= FILE INPUT ================= */
+input[type="file"] {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.05);
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+input[type="file"]:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: #3b82f6;
+}
+
+/* ================= BUTTON ================= */
+.submit-btn {
+  padding: 12px 25px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.5);
+  transition: all 0.3s ease, transform 0.2s ease;
+}
+
+.submit-btn:hover {
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  box-shadow: 0 12px 35px rgba(37, 99, 235, 0.6);
+  transform: translateY(-2px);
+}
+
+.submit-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.5);
+}
+
+/* ================= OUTPUT BOX ================= */
+.output-box {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  min-height: 200px;
+  padding: 20px;
+  font-family: 'Courier New', Courier, monospace;
+  color: #cbd5f5;
+  overflow-y: auto;
+  box-shadow: inset 0 2px 5px rgba(0,0,0,0.2);
+  transition: all 0.3s ease;
+}
+
+.output-box:hover {
+  background: rgba(255,255,255,0.08);
+}
